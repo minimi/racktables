@@ -413,7 +413,7 @@ END;
 function renderRackspace ()
 {
 	// Handle the location filter
-	@session_start();
+	startSession();
 	if (isset ($_REQUEST['changeLocationFilter']))
 		unset ($_SESSION['locationFilter']);
 	if (isset ($_REQUEST['location_id']))
@@ -1655,7 +1655,7 @@ function renderPortsForObject ($object_id)
 		printOpFormIntro ('addPort');
 		echo "<tr><td>";
 		printImageHREF ('add', 'add a port', TRUE);
-		echo "</td><td class='tdleft'><input type=text size=8 name=port_name></td>\n";
+		echo "</td><td class='tdleft'><input type=text size=16 name=port_name></td>\n";
 		echo "<td><input type=text name=port_label></td><td>";
 		printNiftySelect (getNewPortTypeOptions(), array ('name' => 'port_type_id'), $prefs['selected']);
 		echo "<td><input type=text name=port_l2address size=18 maxlength=24></td>\n";
@@ -1723,12 +1723,18 @@ function renderPortsForObject ($object_id)
 		printImageHREF ('delete', 'Unlink and Delete this port');
 		echo "</a></td>\n";
 		$a_class = isEthernetPort ($port) ? 'port-menu' : '';
-		echo "<td class='tdleft $name_class' NOWRAP><input type=text name=name class='interactive-portname $a_class' value='${port['name']}' size=8></td>";
+		echo "<td class='tdleft $name_class' NOWRAP><input type=text name=name class='interactive-portname $a_class' value='${port['name']}' size=16></td>";
 		echo "<td><input type=text name=label value='${port['label']}'></td>";
 		echo '<td>';
 		if ($port['iif_id'] != 1)
 			echo '<label>' . $port['iif_name'] . ' ';
-		printSelect (getExistingPortTypeOptions ($port['id']), array ('name' => 'port_type_id'), $port['oif_id']);
+		$port_type_opts = array();
+		if (! $port['linked'])
+			$port_type_opts = getUnlinkedPortTypeOptions ($port['iif_id']);
+		else
+			foreach (getExistingPortTypeOptions ($port) as $oif_id => $opt_str)
+				$port_type_opts[$port['iif_name']][$port['iif_id'] . '-' . $oif_id] = $opt_str;
+		printNiftySelect ($port_type_opts, array ('name' => 'port_type_id'), $port['iif_id'] . '-' . $port['oif_id']);
 		if ($port['iif_id'] != 1)
 			echo '</label>';
 		echo '</td>';
@@ -1892,7 +1898,7 @@ function showMessageOrError ()
 {
 	global $log_messages;
 
-	@session_start();
+	startSession();
 	if (isset ($_SESSION['log']))
 	{
 		$log_messages = array_merge ($_SESSION['log'], $log_messages);
@@ -2159,7 +2165,7 @@ function renderRackSpaceForObject ($object_id)
 		$matched_tags = array();
 		foreach ($allRacksData as $rack)
 		{
-			$tag_chain = array_replace ($rack['etags'], $rack['itags']);
+			$tag_chain = array_merge ($rack['etags'], $rack['itags']);
 			foreach ($object['etags'] as $tag)
 				if (tagOnChain ($tag, $tag_chain))
 				{
@@ -2762,7 +2768,7 @@ function renderIPNetwork ($id)
 	foreach (array_count_values (reduceSubarraysToColumn ($range['8021q'], 'domain_id')) as $domain_id => $vlan_count)
 		$domainclass[$domain_id] = $vlan_count == 1 ? '' : ($reuse_domain ? '{trwarning}' : '{trerror}');
 	foreach ($range['8021q'] as $item)
-		$summary[] = array ($domainclass[$item['domain_id']] . 'VLAN:', formatVLANAsHyperlink (getVLANInfo ($item['domain_id'] . '-' . $item['vlan_id'])));
+		$summary[] = array ($domainclass[$item['domain_id']] . 'VLAN:', formatVLANAsHyperlink (getVlanRow ($item['domain_id'] . '-' . $item['vlan_id'])));
 	if (getConfigVar ('EXT_IPV4_VIEW') == 'yes' and count ($routers = findNetRouters ($range)))
 	{
 		$summary['Routed by'] = '';
@@ -3620,7 +3626,7 @@ function renderSearchResults ($terms, $summary)
 					startPortlet ('IPv6 addresses');
 				echo '<table border=0 cellpadding=5 cellspacing=0 align=center class=cooltable>';
 				// FIXME: address, parent network, routers (if extended view is enabled)
-				echo '<tr><th>Address</th><th>Description</th></tr>';
+				echo '<tr><th>Address</th><th>Description</th><th>Comment</th></tr>';
 				foreach ($what as $addr)
 				{
 					echo "<tr class=row_${order}><td class=tdleft>";
@@ -3635,7 +3641,7 @@ function renderSearchResults ($terms, $summary)
 							)) . "'>${fmt}</a></td>";
 					else
 						echo "<a href='index.php?page=ipaddress&tab=default&ip=${fmt}'>${fmt}</a></td>";
-					echo "<td class=tdleft>${addr['name']}</td></tr>";
+					echo "<td class=tdleft>${addr['name']}</td><td>${addr['comment']}</td></tr>";
 					$order = $nextorder[$order];
 				}
 				echo '</table>';
@@ -3751,7 +3757,7 @@ function renderSearchResults ($terms, $summary)
 				foreach ($what as $vlan)
 				{
 					echo "<tr class=row_${order}><td class=tdleft>";
-					echo formatVLANAsHyperlink (getVLANInfo ($vlan['id'])) . "</td></tr>";
+					echo formatVLANAsHyperlink (getVlanRow ($vlan['id'])) . "</td></tr>";
 					$order = $nextorder[$order];
 				}
 				echo '</table>';
@@ -6607,7 +6613,7 @@ function dynamic_title_decoder ($path_position)
 	case 'vlan':
 		return array
 		(
-			'name' => formatVLANAsPlainText (getVLANInfo ($sic['vlan_ck'])),
+			'name' => formatVLANAsPlainText (getVlanRow ($sic['vlan_ck'])),
 			'params' => array ('vlan_ck' => $sic['vlan_ck'])
 		);
 	case 'vst':
@@ -7017,15 +7023,26 @@ function renderVLANDomainListEditor ()
 		printImageHREF ('create', 'create domain', TRUE);
 		echo '</td><td>';
 		echo '<input type=text size=48 name=vdom_descr>';
+		echo '</td>&nbsp;<td>';
 		echo '</td><td>';
 		printImageHREF ('create', 'create domain', TRUE);
 		echo '</td></tr></form>';
 	}
+	$domain_list = getVLANDomainStats();
+	$group_opts = array('existing groups' => array (0 => '-- no group --'));
+	foreach ($domain_list as $vdom_id => $dominfo)
+	{
+		if ($dominfo['group_id'])
+			continue;
+		$key = $dominfo['subdomc'] ? 'existing groups' : 'create group';
+		$group_opts[$key][$vdom_id] = $dominfo['description'];
+	}
+
 	echo '<table cellspacing=0 cellpadding=5 align=center class=widetable>';
-	echo '<tr><th>&nbsp;</th><th>description</th><th>&nbsp;</th></tr>';
+	echo '<tr><th>&nbsp;</th><th>description</th><th>group</th><th>&nbsp;</th></tr>';
 	if (getConfigVar ('ADDNEW_AT_TOP') == 'yes')
 		printNewItemTR();
-	foreach (getVLANDomainStats() as $vdom_id => $dominfo)
+	foreach ($domain_list as $vdom_id => $dominfo)
 	{
 		printOpFormIntro ('upd', array ('vdom_id' => $vdom_id));
 		echo '<tr><td>';
@@ -7035,6 +7052,11 @@ function renderVLANDomainListEditor ()
 			echo getOpLink (array ('op' => 'del', 'vdom_id' => $vdom_id), '', 'destroy', 'delete domain');
 		echo '</td><td><input name=vdom_descr type=text size=48 value="';
 		echo niftyString ($dominfo['description'], 0) . '">';
+		echo '</td><td>';
+		if ($dominfo['subdomc'])
+			printSelect (array (0 => 'a domain group'), array ('name' => 'group_id'));
+		else
+			printNiftySelect ($group_opts, array ('name' => 'group_id'), intval($dominfo['group_id']));
 		echo '</td><td>';
 		printImageHREF ('save', 'update description', TRUE);
 		echo '</td></tr></form>';
@@ -7080,7 +7102,18 @@ function renderVLANDomain ($vdom_id)
 
 	echo '</td><td class=pcright>';
 
-	if (!count ($myvlans = getDomainVLANs ($vdom_id)))
+	$domain_options = getVLANDomainOptions();
+	$myvlans = array();
+	foreach (array_merge(array ($vdom_id), getDomainGroupMembers ($vdom_id)) as $domain_id)
+		foreach (getDomainVLANs ($domain_id, TRUE) as $vlan_id => $vlan_info)
+		{
+			$vlan_info['domain_id'] = $domain_id;
+			$vlan_info['domain_descr'] = $domain_options[$domain_id];
+			$myvlans[$vlan_id][$domain_id] = $vlan_info;
+		}
+	ksort ($myvlans, SORT_NUMERIC);
+
+	if (!count ($myvlans))
 		startPortlet ('no VLANs');
 	else
 	{
@@ -7088,17 +7121,21 @@ function renderVLANDomain ($vdom_id)
 		$order = 'odd';
 		global $vtdecoder;
 		echo '<table class=cooltable align=center border=0 cellpadding=5 cellspacing=0>';
-		echo '<tr><th>VLAN ID</th><th>propagation</th><th>';
+		echo '<tr><th>VLAN ID</th><th><span title="propagation flag">P</span></th><th>';
 		printImageHREF ('net', 'IPv4 networks linked');
 		echo '</th><th>ports</th><th>description</th></tr>';
-		foreach ($myvlans as $vlan_id => $vlan_info)
+		foreach ($myvlans as $vlan_id => $vlan_list)
 		{
-			echo "<tr class=row_${order}>";
-			echo '<td class=tdright>' . mkA ($vlan_id, 'vlan', "${vdom_id}-${vlan_id}") . '</td>';
-			echo '<td>' . $vtdecoder[$vlan_info['vlan_type']] . '</td>';
-			echo '<td class=tdright>' . ($vlan_info['netc'] ? $vlan_info['netc'] : '&nbsp;') . '</td>';
-			echo '<td class=tdright>' . ($vlan_info['portc'] ? $vlan_info['portc'] : '&nbsp;') . '</td>';
-			echo "<td class=tdleft>${vlan_info['vlan_descr']}</td></tr>";
+			foreach ($vlan_list as $domain_id => $vlan_info)
+			{
+				echo "<tr class=row_${order}>";
+				echo '<td class=tdright>' . (count ($vlan_list) > 1 ? $domain_options[$domain_id] . ' ' : '') .
+					formatVLANAsShortLink ($vlan_info) . '</td>';
+				echo '<td>' . $vtdecoder[$vlan_info['vlan_type']] . '</td>';
+				echo '<td class=tdright>' . ($vlan_info['netc'] ? $vlan_info['netc'] : '&nbsp;') . '</td>';
+				echo '<td class=tdright>' . ($vlan_info['portc'] ? $vlan_info['portc'] : '&nbsp;') . '</td>';
+				echo "<td class=tdleft>${vlan_info['vlan_descr']}</td></tr>";
+			}
 			$order = $nextorder[$order];
 		}
 		echo '</table>';
@@ -7130,7 +7167,7 @@ function renderVLANDomainVLANList ($vdom_id)
 	if (getConfigVar ('ADDNEW_AT_TOP') == 'yes')
 		printNewItemTR();
 	global $vtoptions;
-	foreach (getDomainVLANs ($vdom_id) as $vlan_id => $vlan_info)
+	foreach (getDomainVLANs ($vdom_id, TRUE) as $vlan_id => $vlan_info)
 	{
 		printOpFormIntro ('upd', array ('vlan_id' => $vlan_id));
 		echo '<tr><td>';
@@ -7520,18 +7557,25 @@ function renderVLANInfo ($vlan_ck)
 {
 	global $vtoptions, $nextorder;
 	$vlan = getVLANInfo ($vlan_ck);
+	$group_members = getDomainGroupMembers ($vlan['domain_id']);
+
+	// list of VLANs to display linked nets and ports from.
+	// If domain is a group master, this list contains all
+	// the counterpart vlans from domain group members.
+	// If domain is a group member, the list contains one
+	// counterpart vlan from the domain master.
+	$group_ck_list = array();
+
 	echo '<table border=0 class=objectview cellspacing=0 cellpadding=0>';
 	echo '<tr><td colspan=2 align=center><h1>' . formatVLANAsRichText ($vlan) . '</h1></td></tr>';
 	echo "<tr><td class=pcleft width='50%'>";
-	startPortlet ('summary');
-	echo "<table border=0 cellspacing=0 cellpadding=3 width='100%'>";
-	echo "<tr><th width='50%' class=tdright>Domain:</th><td class=tdleft>";
-	echo niftyString ($vlan['domain_descr'], 0) . '</td></tr>';
-	echo "<tr><th width='50%' class=tdright>VLAN ID:</th><td class=tdleft>${vlan['vlan_id']}</td></tr>";
+	$summary = array();
+	$summary['Domain'] = niftyString ($vlan['domain_descr'], 0);
+	$summary['VLAN ID'] = $vlan['vlan_id'];
 	if (strlen ($vlan['vlan_descr']))
-		echo "<tr><th width='50%' class=tdright>Description:</th><td class=tdleft>" .
-			niftyString ($vlan['vlan_descr'], 0) . "</td></tr>";
-	echo "<tr><th width='50%' class=tdright>Propagation:</th><td class=tdleft>" . $vtoptions[$vlan['vlan_prop']] . "</td></tr>";
+		$summary['Description'] = niftyString ($vlan['vlan_descr'], 0);
+	$summary['Propagation'] = $vtoptions[$vlan['vlan_prop']];
+
 	$others = getSearchResultByField
 	(
 		'VLANDescription',
@@ -7541,18 +7585,57 @@ function renderVLANInfo ($vlan_ck)
 		'domain_id',
 		1
 	);
+	$counterparts = array();
+	$group_counterparts = array();
+	$domain_list = getVLANDomainOptions();
 	foreach ($others as $other)
 		if ($other['domain_id'] != $vlan['domain_id'])
-			echo '<tr><th class=tdright>Counterpart:</th><td class=tdleft>' .
-				formatVLANAsHyperlink (getVLANInfo ("${other['domain_id']}-${vlan['vlan_id']}")) .
-				'</td></tr>';
-	echo '</table>';
-	finishPortlet();
-	if (0 == count ($vlan['ipv4nets']) + count ($vlan['ipv6nets']))
+		{
+			$counterpart_ck = "${other['domain_id']}-${vlan['vlan_id']}";
+			$counterpart_vlan = getVlanRow ($counterpart_ck);
+			$counterpart_link = mkA
+			(
+				$domain_list[$counterpart_vlan['domain_id']] . ': ' . $counterpart_vlan['vlan_descr'],
+				'vlan',
+				$counterpart_ck
+			);
+			if
+			(
+				$counterpart_vlan['domain_id'] == $vlan['domain_group_id'] or
+				in_array($counterpart_vlan['domain_id'], $group_members)
+			)
+			{
+				$group_ck_list[$counterpart_ck] = $counterpart_vlan;
+				$group_counterparts[] = $counterpart_link;
+			}
+			elseif ($vlan['domain_group_id'] and $counterpart_vlan['domain_group_id'] == $vlan['domain_group_id'])
+				$group_counterparts[] = $counterpart_link;
+			else
+				$counterparts[] = $counterpart_link;
+		}
+	if ($group_counterparts)
+	{
+		$group_id = $vlan['domain_group_id'] ? $vlan['domain_group_id'] : $vlan['domain_id'];
+		$summary[$domain_list[$group_id] . ' counterparts'] = implode ('<br>', $group_counterparts);
+	}
+	if ($counterparts)
+		$summary['Counterparts'] = implode ('<br>', $counterparts);
+	renderEntitySummary ($vlan, 'summary', $summary);
+
+	$networks = array();
+	$net_vlan_list = array ($vlan);
+	foreach (array_keys ($group_ck_list) as $grouped_ck)
+		$net_vlan_list[] = getVLANInfo ($grouped_ck);
+	foreach ($net_vlan_list as $net_vlan)
+		foreach (array ('ipv4net' => 'ipv4nets', 'ipv6net' => 'ipv6nets') as $realm => $key)
+			foreach ($net_vlan[$key] as $net_id)
+				$networks["$realm-$net_id"] = spotEntity ($realm, $net_id);
+
+	if (0 == count ($networks))
 		startPortlet ('no networks');
 	else
 	{
-		startPortlet ('networks (' . (count ($vlan['ipv4nets']) + count ($vlan['ipv6nets'])) . ')');
+		startPortlet ('networks (' . count ($networks) . ')');
 		$order = 'odd';
 		echo '<table cellspacing=0 cellpadding=5 align=center class=widetable>';
 		echo '<tr><th>';
@@ -7560,10 +7643,8 @@ function renderVLANInfo ($vlan_ck)
 		echo '</th><th>';
 		printImageHREF ('text');
 		echo '</th></tr>';
-		foreach (array ('ipv4net', 'ipv6net') as $nettype)
-		foreach ($vlan[$nettype . 's'] as $netid)
+		foreach ($networks as $net)
 		{
-			$net = spotEntity ($nettype, $netid);
 			#echo "<tr class=row_${order}><td>";
 			echo '<tr><td>';
 			renderCell ($net);
@@ -7576,6 +7657,16 @@ function renderVLANInfo ($vlan_ck)
 	finishPortlet();
 
 	$confports = getVLANConfiguredPorts ($vlan_ck);
+	foreach (array_keys ($group_ck_list) as $grouped_ck)
+		$confports += getVLANConfiguredPorts ($grouped_ck);
+	if ($vlan['domain_group_id'])
+	{
+		// we should find configured port on master's members
+		// even if master domain itself does not have such VLAN
+		$master_ck = $vlan['domain_group_id'] . '-' . $vlan['vlan_id'];
+		if (! isset ($group_ck_list[$master_ck]))
+			$confports += getVLANConfiguredPorts ($master_ck);
+	}
 
 	// get non-switch device list
 	$foreign_devices = array();
@@ -7629,7 +7720,11 @@ function renderVLANInfo ($vlan_ck)
 			{
 				echo '<li>';
 				if ($portinfo = getPortinfoByName ($object, $port_name))
+				{
 					echo formatPortLink ($object['id'], NULL, $portinfo['id'], $portinfo['name']);
+					if ($portinfo['linked'])
+						echo ' &mdash; ' . formatPortLink ($portinfo['remote_object_id'], $portinfo['remote_object_name'], $portinfo['remote_id'], NULL);
+				}
 				else
 					echo $port_name;
 				echo '</li>';
@@ -7732,7 +7827,7 @@ function renderVLANIPLinks ($some_id)
 			break;
 		case 'ipv4net':
 		case 'ipv6net':
-			$vlaninfo = getVLANInfo ($item['domain_id'] . '-' . $item['vlan_id']);
+			$vlaninfo = getVlanRow ($item['domain_id'] . '-' . $item['vlan_id']);
 			echo formatVLANAsRichText ($vlaninfo);
 			break;
 		}
@@ -8215,7 +8310,7 @@ function renderVSTRulesEditor ($vst_id)
 	$row_html .= '<td><input type=text name=description value="%s"></td>';
 	$row_html .= '<td><a href="#" class="vst-add-rule">' . getImageHREF ('add', 'Duplicate rule') . '</a></td>';
 	addJS ("var new_vst_row = '" . addslashes (sprintf ($row_html, '', '', getSelect ($port_role_options, array ('name' => 'port_role'), 'anymode'), '', '')) . "';", TRUE);
-	@session_start();
+	startSession();
 	foreach (isset ($_SESSION['vst_edited']) ? $_SESSION['vst_edited'] : $vst['rules'] as $item)
 		printf ('<tr>' . $row_html . '</tr>', $item['rule_no'], htmlspecialchars ($item['port_pcre'], ENT_QUOTES),  getSelect ($port_role_options, array ('name' => 'port_role'), $item['port_role']), $item['wrt_vlans'], $item['description']);
 	echo '</table>';
@@ -8396,7 +8491,7 @@ function renderDiscoveredNeighbors ($object_id)
 					{
 						$tmp_types = ($portinfo['iif_id'] == 1) ?
 							array ($portinfo['oif_id'] => $portinfo['oif_name']) :
-							getExistingPortTypeOptions ($portinfo['id']);
+							getExistingPortTypeOptions ($portinfo);
 						foreach ($tmp_types as $oif_id => $oif_name)
 							$port_types[$side][$oif_id][] = array ('id' => $oif_id, 'name' => $oif_name, 'portinfo' => $portinfo);
 					}
@@ -8927,7 +9022,19 @@ function renderObjectMuninGraphs ($object_id)
 		echo "<br/><br/>";
 	}
 	if (!extension_loaded ('curl'))
-		throw new RackTablesError ("The PHP cURL extension is not loaded.", RackTablesError::MISCONFIGURED);
+	{
+		showError ('The PHP cURL extension is not loaded.');
+		return;
+	}
+	try
+	{
+		list ($host, $domain) = getMuninNameAndDomain ($object_id);
+	}
+	catch (InvalidArgException $e)
+	{
+		showError ('This object does not have the FQDN or the common name in the host.do.ma.in format.');
+		return;
+	}
 
 	$servers = getMuninServers();
 	$options = array();
@@ -8938,15 +9045,12 @@ function renderObjectMuninGraphs ($object_id)
 		printNewItem ($options);
 	echo "<table cellspacing=\"0\" cellpadding=\"10\" align=\"center\" width=\"50%\">";
 
-	$object = spotEntity ('object', $object_id);
-	list ($host, $domain) = preg_split ("/\./", $object['dname'], 2);
-
 	foreach (getMuninGraphsForObject ($object_id) as $graph_name => $graph)
 	{
 		$munin_url = $servers[$graph['server_id']]['base_url'];
 		$text = "(graph ${graph_name} on server ${graph['server_id']})";
 		echo "<tr><td>";
-		echo "<a href='${munin_url}/${domain}/${object['dname']}/${graph_name}.html' target='_blank'>";
+		echo "<a href='${munin_url}/${domain}/${host}.${domain}/${graph_name}.html' target='_blank'>";
 		echo "<img src='index.php?module=image&img=muningraph&object_id=${object_id}&server_id=${graph['server_id']}&graph=${graph_name}' alt='${text}' title='${text}'></a></td>";
 		echo "<td>";
 		echo getOpLink (array ('op' => 'del', 'server_id' => $graph['server_id'], 'graph' => $graph_name), '', 'Cut', 'Unlink graph', 'need-confirmation');
@@ -8996,13 +9100,12 @@ function renderEditVlan ($vlan_ck)
 	$reason = '';
 	if ($vlan['vlan_id'] == VLAN_DFL_ID)
 		$reason = "You can not delete default VLAN";
-	elseif ($portc)
-		$reason = "Can not delete: $portc ports configured";
 	if (! empty ($reason))
 		echo getOpLink (NULL, 'delete VLAN', 'nodestroy', $reason);
 	else
-		echo getOpLink (array ('op' => 'del', 'vlan_ck' => $vlan_ck), 'delete VLAN', 'destroy');
+		echo getOpLink (array ('op' => 'del', 'vlan_ck' => $vlan_ck), 'delete VLAN', 'destroy', '', 'need-confirmation');
 	echo $clear_line;
+
 	finishPortlet();
 }
 
@@ -10052,7 +10155,12 @@ function renderSimpleTableWithOriginEditor ($rows, $column)
 		{
 			printOpFormIntro ('upd', array ($column['key'] => $row[$column['key']]));
 			echo '<td>' . getImageHREF ('favorite', 'custom') . '</td>';
-			echo '<td>' . getOpLink (array ('op' => 'del', $column['key'] => $row[$column['key']]), '', 'destroy', 'remove') . '</td>';
+			echo '<td>';
+			if (array_key_exists ('refc', $row) && $row['refc'] > 0)
+				echo getImageHREF ('nodestroy', "referenced ${row['refc']} times");
+			else
+				echo getOpLink (array ('op' => 'del', $column['key'] => $row[$column['key']]), '', 'destroy', 'remove');
+			echo '</td>';
 			echo "<td><input type=text size=${column['width']} name=${column['value']} value='" . niftyString ($row[$column['value']], $column['width']) . "'></td>";
 			echo '<td>' . getImageHREF ('save', 'Save changes', TRUE) . '</td>';
 			echo '</form>';

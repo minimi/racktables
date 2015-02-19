@@ -335,7 +335,7 @@ END
 		else
 		{
 			echo '<label>' . $port_info['iif_name'] . ' ';
-			printSelect (getExistingPortTypeOptions ($port_info['id']), array ('class' => 'porttype', 'name' => 'port_type'), $type_local);
+			printSelect (getExistingPortTypeOptions ($port_info), array ('class' => 'porttype', 'name' => 'port_type'), $type_local);
 			echo '</label>';
 		}
 		echo ' &mdash; ';
@@ -347,7 +347,7 @@ END
 		else
 		{
 			echo '<label>' . $remote_port_info['iif_name'] . ' ';
-			printSelect (getExistingPortTypeOptions ($remote_port_info['id']), array ('class' => 'porttype', 'name' => 'remote_port_type'), $type_remote);
+			printSelect (getExistingPortTypeOptions ($remote_port_info), array ('class' => 'porttype', 'name' => 'remote_port_type'), $type_remote);
 			echo '</label>';
 		}
 		echo ' ' . formatPort ($remote_port_info);
@@ -464,7 +464,7 @@ function renderPopupHTML ($contents)
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en" style="height: 100%;">
 <head>
 <title>RackTables pop-up</title>
-<? printPageHeaders(); ?>
+<?php printPageHeaders(); ?>
 </head>
 <body style="height: 100%;">
 <div class="popupbar"><?php echo $contents; ?></div>

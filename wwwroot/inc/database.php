@@ -270,7 +270,7 @@ function getLocations ($location_id)
 		'SELECT id, name FROM Location WHERE parent_id = ? ORDER BY name',
 		array ($location_id)
 	);
-	return reduceSubarraysToColumn (reindexByID ($result->fetchAll (PDO::FETCH_ASSOC)), 'name');
+	return reduceSubarraysToColumn (reindexById ($result->fetchAll (PDO::FETCH_ASSOC)), 'name');
 }
 
 // Return detailed information about one rack row.
@@ -310,7 +310,7 @@ function getRows ($location_id)
 		'ORDER BY R.name',
 		array ($location_id)
 	);
-	return reduceSubarraysToColumn (reindexByID ($result->fetchAll (PDO::FETCH_ASSOC)), 'name');
+	return reduceSubarraysToColumn (reindexById ($result->fetchAll (PDO::FETCH_ASSOC)), 'name');
 }
 
 function getRacks ($row_id)
@@ -1746,13 +1746,27 @@ function commitUpdatePort ($object_id, $port_id, $port_name, $port_type_id, $por
 		}
 		$prev_comment = getPortReservationComment ($port_id);
 		$reservation_comment = mb_strlen ($port_reservation_comment) ? $port_reservation_comment : NULL;
+		switch (1)
+		{
+		case preg_match ('/^([[:digit:]]+)-([[:digit:]]+)$/', $port_type_id, $matches):
+			$iif_id = $matches[1];
+			$oif_id = $matches[2];
+			break;
+		case preg_match ('/^([[:digit:]]+)$/', $port_type_id, $matches):
+			$iif_id = $portinfo['iif_id'];
+			$oif_id = $matches[1];
+			break;
+		default:
+			throw new InvalidArgException ('port_type_id', $port_type_id, 'format error');
+		}
 		usePreparedUpdateBlade
 		(
 			'Port',
 			array
 			(
 				'name' => $port_name,
-				'type' => $port_type_id,
+				'iif_id' => $iif_id,
+				'type' => $oif_id,
 				'label' => $port_label,
 				'reservation_comment' => $reservation_comment,
 				'l2address' => nullEmptyStr ($db_l2address),
@@ -2789,13 +2803,14 @@ function getIPv6PrefixSearchResult ($terms)
 
 function getIPv4AddressSearchResult ($terms)
 {
-	$query = "select ip, name from IPv4Address where ";
+	$query = "select ip, name, comment from IPv4Address where ";
 	$or = '';
 	$qparams = array();
 	foreach (explode (' ', $terms) as $term)
 	{
-		$query .= $or . "name like ?";
+		$query .= $or . "name like ? or comment like ?";
 		$or = ' or ';
+		$qparams[] = "%${term}%";
 		$qparams[] = "%${term}%";
 	}
 	$result = usePreparedSelectBlade ($query, $qparams);
@@ -2811,13 +2826,14 @@ function getIPv4AddressSearchResult ($terms)
 
 function getIPv6AddressSearchResult ($terms)
 {
-	$query = "select ip, name from IPv6Address where ";
+	$query = "select ip, name, comment from IPv6Address where ";
 	$or = '';
 	$qparams = array();
 	foreach (explode (' ', $terms) as $term)
 	{
-		$query .= $or . "name like ?";
+		$query .= $or . "name like ? or comment like ?";
 		$or = ' or ';
+		$qparams[] = "%${term}%";
 		$qparams[] = "%${term}%";
 	}
 	$result = usePreparedSelectBlade ($query, $qparams);
@@ -3631,12 +3647,11 @@ function getPortOIFRefc()
 	(
 		'SELECT POI.id, (' .
 		'(SELECT COUNT(*) FROM PortCompat WHERE type1 = id) + ' .
-		'(SELECT COUNT(*) FROM PortCompat WHERE type2 = id) + ' .
 		'(SELECT COUNT(*) FROM Port WHERE type = POI.id) + ' .
 		'(SELECT COUNT(*) FROM PortInterfaceCompat WHERE oif_id = POI.id)' .
 		') AS refcnt FROM PortOuterInterface AS POI'
 	);
-	return reduceSubarraysToColumn (reindexByID ($result->fetchAll (PDO::FETCH_ASSOC)), 'refcnt');
+	return reduceSubarraysToColumn (reindexById ($result->fetchAll (PDO::FETCH_ASSOC)), 'refcnt');
 }
 
 function getAttrType ($attr_id)
@@ -4609,7 +4624,7 @@ function getAllUnlinkedFiles ($entity_type = NULL, $entity_id = 0)
 		'ORDER BY name, id',
 		array ($entity_type, $entity_id)
 	);
-	return reduceSubarraysToColumn (reindexByID ($result->fetchAll (PDO::FETCH_ASSOC)), 'name');
+	return reduceSubarraysToColumn (reindexById ($result->fetchAll (PDO::FETCH_ASSOC)), 'name');
 }
 
 // FIXME: return a standard cell list, so upper layer can iterate over
@@ -4688,7 +4703,7 @@ function getFileLinks ($file_id)
 		'WHERE file_id = ? ORDER BY entity_type, entity_id',
 		array ($file_id)
 	);
-	return reindexByID ($result->fetchAll (PDO::FETCH_ASSOC));
+	return reindexById ($result->fetchAll (PDO::FETCH_ASSOC));
 }
 
 function getFileStats ()
@@ -4930,36 +4945,35 @@ function getPortInterfaceCompat()
 // Return a set of options for a plain SELECT. These options include the current
 // OIF of the given port and all OIFs of its permanent IIF.
 // If given port is already linked, returns only types compatible with the remote port's type
-function getExistingPortTypeOptions ($port_id)
+function getExistingPortTypeOptions ($portinfo)
 {
-	$portinfo = getPortInfo ($port_id);
 	$remote_type = NULL;
 	if ($portinfo['linked'])
 	{
 		$remote_portinfo = getPortInfo ($portinfo['remote_id']);
 		$result = usePreparedSelectBlade ("
-SELECT DISTINCT oif_id, oif_name
-FROM PortInterfaceCompat INNER JOIN PortOuterInterface ON oif_id = id
-LEFT JOIN PortCompat pc1 ON oif_id = pc1.type1 AND pc1.type2 = ?
-LEFT JOIN PortCompat pc2 ON oif_id = pc1.type2 AND pc2.type1 = ?
-WHERE iif_id = (SELECT iif_id FROM Port WHERE id = ?)
-AND (pc1.type1 IS NOT NULL OR pc2.type2 IS NOT NULL)
+SELECT oif_id, oif_name
+FROM PortInterfaceCompat
+INNER JOIN PortOuterInterface ON oif_id = id
+INNER JOIN PortCompat pc ON pc.type1 = oif_id AND pc.type2 = ?
+WHERE iif_id = ?
 ORDER BY oif_name
-", array ($remote_portinfo['oif_id'], $remote_portinfo['oif_id'], $port_id)
+", array ($remote_portinfo['oif_id'], $portinfo['iif_id'])
 		);
 	}
 	else
 	{
 		$result = usePreparedSelectBlade ("
 SELECT oif_id, oif_name
-FROM PortInterfaceCompat INNER JOIN PortOuterInterface ON oif_id = id
-WHERE iif_id = (SELECT iif_id FROM Port WHERE id = ?)
+FROM PortInterfaceCompat
+INNER JOIN PortOuterInterface ON oif_id = id
+WHERE iif_id = ?
 ORDER BY oif_name
-", array ($port_id)
+", array ($portinfo['iif_id'])
 		);
 	}
 
-	return reduceSubarraysToColumn (reindexByID ($result->fetchAll (PDO::FETCH_ASSOC), 'oif_id'), 'oif_name');
+	return reduceSubarraysToColumn (reindexById ($result->fetchAll (PDO::FETCH_ASSOC), 'oif_id'), 'oif_name');
 }
 
 function getPortTypeUsageStatistics()
@@ -4978,13 +4992,13 @@ function getPortTypeUsageStatistics()
 function getPortIIFOptions()
 {
 	$result = usePreparedSelectBlade ('SELECT id, iif_name FROM PortInnerInterface ORDER BY iif_name');
-	return reduceSubarraysToColumn (reindexByID ($result->fetchAll (PDO::FETCH_ASSOC)), 'iif_name');
+	return reduceSubarraysToColumn (reindexById ($result->fetchAll (PDO::FETCH_ASSOC)), 'iif_name');
 }
 
 function getPortOIFOptions()
 {
 	$result = usePreparedSelectBlade ('SELECT id, oif_name FROM PortOuterInterface ORDER BY oif_name');
-	return reduceSubarraysToColumn (reindexByID ($result->fetchAll (PDO::FETCH_ASSOC)), 'oif_name');
+	return reduceSubarraysToColumn (reindexById ($result->fetchAll (PDO::FETCH_ASSOC)), 'oif_name');
 }
 
 function commitSupplementPIC ($iif_id, $oif_id)
@@ -5020,25 +5034,40 @@ function getVLANDomainStats ()
 {
 	$result = usePreparedSelectBlade
 	(
-		'SELECT id, description, ' .
+		'SELECT id, group_id, description, ' .
+		'(SELECT COUNT(vd.id) FROM VLANDomain vd WHERE vd.group_id = VLANDomain.id) as subdomc, ' .
 		'(SELECT COUNT(vlan_id) FROM VLANDescription WHERE domain_id = id) AS vlanc, ' .
 		'(SELECT COUNT(ipv4net_id) FROM VLANIPv4 WHERE domain_id = id) AS ipv4netc, ' .
 		'(SELECT COUNT(object_id) FROM VLANSwitch WHERE domain_id = id) AS switchc, ' .
 		'(SELECT COUNT(port_name) FROM VLANSwitch AS VS INNER JOIN PortVLANMode AS PVM ON VS.object_id = PVM.object_id WHERE domain_id = id) AS portc ' .
 		'FROM VLANDomain ORDER BY description'
 	);
-	return reindexById ($result->fetchAll (PDO::FETCH_ASSOC));
+	$ret = reindexById ($result->fetchAll (PDO::FETCH_ASSOC));
+	foreach ($ret as $vdom_id => $domain)
+		if ($domain['group_id'])
+		{
+			// sum only vlans/nets because subdomains have switches/ports of their own
+			$ret[$domain['group_id']]['vlanc'] += $domain['vlanc'];
+			$ret[$domain['group_id']]['ipv4netc'] += $domain['ipv4netc'];
+		}
+	return $ret;
 }
 
 function getVLANDomainOptions()
 {
 	$result = usePreparedSelectBlade ('SELECT id, description FROM VLANDomain ORDER BY description');
-	return reduceSubarraysToColumn (reindexByID ($result->fetchAll (PDO::FETCH_ASSOC)), 'description');
+	return reduceSubarraysToColumn (reindexById ($result->fetchAll (PDO::FETCH_ASSOC)), 'description');
 }
 
 function getVLANDomain ($vdid)
 {
-	$result = usePreparedSelectBlade ('SELECT id, description FROM VLANDomain WHERE id = ?', array ($vdid));
+	$result = usePreparedSelectBlade
+	(
+		'SELECT id, group_id, description, ' .
+		'(SELECT COUNT(vd.id) FROM VLANDomain vd WHERE vd.group_id = VLANDomain.id) as subdomc ' .
+		'FROM VLANDomain WHERE id = ?',
+		array ($vdid)
+	);
 	if (!$ret = $result->fetch (PDO::FETCH_ASSOC))
 		throw new EntityNotFoundException ('VLAN domain', $vdid);
 	unset ($result);
@@ -5056,9 +5085,34 @@ function getVLANDomain ($vdid)
 	return $ret;
 }
 
-// TODO: this function is very inefficient. Consider use of getDomainVLANList instead
-function getDomainVLANs ($vdom_id)
+function getDomainGroupMembers ($vdom_group_id)
 {
+	$result = usePreparedSelectBlade ("SELECT id FROM VLANDomain WHERE group_id = ?", array ($vdom_group_id));
+	return $result->fetchAll (PDO::FETCH_COLUMN, 0);
+}
+
+// This function is pretty heavy. Consider use of getDomainVLANList instead
+// If $strict is false, returns VLANs belonging to the domain or group.
+// Otherwise the vlans of group subdomains are not returned.
+function getDomainVLANs ($vdom_id, $strict = FALSE)
+{
+	if (! $strict and $members = getDomainGroupMembers ($vdom_id))
+	{
+		$self = __FUNCTION__;
+		$ret = $self ($vdom_id, TRUE);
+		foreach ($members as $member_vdom_id)
+			foreach ($self ($member_vdom_id, TRUE) as $vid => $vlan_info)
+				if (! isset ($ret[$vid]))
+					$ret[$vid] = $vlan_info;
+				else
+				{
+					$ret[$vid]['netc'] += $vlan_info['netc'];
+					$ret[$vid]['portc'] += $vlan_info['portc'];
+				}
+		ksort ($ret, SORT_NUMERIC);
+		return $ret;
+	}
+
 	$result = usePreparedSelectBlade
 	(<<<END
 SELECT
@@ -5067,24 +5121,44 @@ SELECT
 	vlan_descr,
 	(SELECT COUNT(ipv4net_id) FROM VLANIPv4 AS VI WHERE VI.domain_id = VD.domain_id and VI.vlan_id = VD.vlan_id) +
 	(SELECT COUNT(ipv6net_id) FROM VLANIPv6 AS VI WHERE VI.domain_id = VD.domain_id and VI.vlan_id = VD.vlan_id) AS netc,
-	(
-		SELECT COUNT(port_name)
-		FROM VLANSwitch AS VS INNER JOIN PortAllowedVLAN AS PAV ON VS.object_id = PAV.object_id
-		WHERE VS.domain_id = VD.domain_id and PAV.vlan_id = VD.vlan_id
-	) AS portc
+	s2.portc
 FROM
-	VLANDescription AS VD
+	VLANDescription VD LEFT JOIN
+	(
+		SELECT
+			PAV.vlan_id as vid,
+			COUNT(PAV.port_name) as portc
+		FROM
+			VLANSwitch VS
+			INNER JOIN VLANDescription USING (domain_id)
+			INNER JOIN PortAllowedVLAN PAV ON PAV.object_id = VS.object_id AND VLANDescription.vlan_id = PAV.vlan_id
+		WHERE VS.domain_id = ?
+		GROUP BY PAV.vlan_id
+	) AS s2 ON vlan_id = s2.vid
 WHERE domain_id = ?
 ORDER BY vlan_id
+
 END
-		, array ($vdom_id)
+		, array ($vdom_id, $vdom_id)
 	);
-	return reindexByID ($result->fetchAll (PDO::FETCH_ASSOC), 'vlan_id');
+	$ret = reindexById ($result->fetchAll (PDO::FETCH_ASSOC), 'vlan_id');
+	return $ret;
 }
 
-// faster than getDomainVLANs, but w/o statistics
-function getDomainVLANList ($vdom_id)
+// faster than getDomainVLANs, but w/o statistics.
+// If $strict is false, returns VLANs belonging to the domain or group.
+// Otherwise the vlans of group subdomains are not returned.
+function getDomainVLANList ($vdom_id, $strict = FALSE)
 {
+	if (! $strict and $members = getDomainGroupMembers ($vdom_id))
+	{
+		$self = __FUNCTION__;
+		$ret = $self ($vdom_id, TRUE);
+		foreach ($members as $member_vdom_id)
+			$ret += $self ($member_vdom_id, TRUE);
+		return $ret;
+	}
+
 	$result = usePreparedSelectBlade
 	(<<<END
 SELECT
@@ -5098,7 +5172,7 @@ ORDER BY vlan_id
 END
 		, array ($vdom_id)
 	);
-	return reindexByID ($result->fetchAll (PDO::FETCH_ASSOC), 'vlan_id');
+	return reindexById ($result->fetchAll (PDO::FETCH_ASSOC), 'vlan_id');
 }
 
 function getVLANSwitches()
@@ -5160,17 +5234,25 @@ function getStored8021QConfig ($object_id, $instance = 'desired')
 	return $ret;
 }
 
-function getVLANInfo ($vlan_ck)
+function getVlanRow ($vlan_ck)
 {
 	list ($vdom_id, $vlan_id) = decodeVLANCK ($vlan_ck);
 	$query = 'SELECT domain_id, vlan_id, vlan_type AS vlan_prop, vlan_descr, ' .
-		'(SELECT description FROM VLANDomain WHERE id = domain_id) AS domain_descr ' .
+		'(SELECT description FROM VLANDomain WHERE id = domain_id) AS domain_descr, ' .
+		'(SELECT group_id FROM VLANDomain WHERE id = domain_id) AS domain_group_id ' .
 		'FROM VLANDescription WHERE domain_id = ? AND vlan_id = ?';
 	$result = usePreparedSelectBlade ($query, array ($vdom_id, $vlan_id));
 	if (NULL == ($ret = $result->fetch (PDO::FETCH_ASSOC)))
 		throw new EntityNotFoundException ('VLAN', $vlan_ck);
 	$ret['vlan_ck'] = $vlan_ck;
-	unset ($result);
+	return $ret;
+}
+
+function getVLANInfo ($vlan_ck)
+{
+	list ($vdom_id, $vlan_id) = decodeVLANCK ($vlan_ck);
+	$ret = getVlanRow ($vlan_ck);
+
 	$result = usePreparedSelectBlade
 	(
 	 	'SELECT ipv4net_id FROM VLANIPv4 WHERE domain_id = ? AND vlan_id = ? ORDER BY ipv4net_id',
@@ -5641,7 +5723,12 @@ function getEntitiesCount ($realm)
 
 function getPatchCableConnectorList()
 {
-	$result = usePreparedSelectBlade ('SELECT id, origin, connector FROM PatchCableConnector ORDER BY connector');
+	$result = usePreparedSelectBlade
+	(
+		'SELECT id, origin, connector, ' .
+		'(SELECT COUNT(*) FROM PatchCableConnectorCompat WHERE connector_id = id) AS refc ' .
+		'FROM PatchCableConnector ORDER BY connector'
+	);
 	return $result->fetchAll (PDO::FETCH_ASSOC);
 }
 
@@ -5655,7 +5742,13 @@ function getPatchCableConnectorOptions()
 
 function getPatchCableTypeList()
 {
-	$result = usePreparedSelectBlade ('SELECT id, origin, pctype FROM PatchCableType ORDER BY pctype');
+	$result = usePreparedSelectBlade
+	(
+		'SELECT id, origin, pctype, ' .
+		'(SELECT COUNT(*) FROM PatchCableConnectorCompat WHERE pctype_id = PatchCableType.id) + ' .
+		'(SELECT COUNT(*) FROM PatchCableOIFCompat WHERE pctype_id = PatchCableType.id) AS refc ' .
+		'FROM PatchCableType ORDER BY pctype'
+	);
 	return $result->fetchAll (PDO::FETCH_ASSOC);
 }
 
@@ -5681,7 +5774,7 @@ function getPatchCableHeapSummary()
 		'GROUP BY PCH.id ' .
 		'ORDER BY pctype, end1_connector, end2_connector, description, id '
 	);
-	return reindexByID ($result->fetchAll (PDO::FETCH_ASSOC));
+	return reindexById ($result->fetchAll (PDO::FETCH_ASSOC));
 }
 
 function getPatchCableHeapOptionsForOIF ($oif_id)

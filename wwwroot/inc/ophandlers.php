@@ -434,19 +434,6 @@ $opspec_list['8021q-vdlist-del'] = array
 		array ('url_argname' => 'vdom_id', 'table_colname' => 'id', 'assertion' => 'uint'),
 	),
 );
-$opspec_list['8021q-vdlist-upd'] = array
-(
-	'table' => 'VLANDomain',
-	'action' => 'UPDATE',
-	'set_arglist' => array
-	(
-		array ('url_argname' => 'vdom_descr', 'table_colname' => 'description', 'assertion' => 'string'),
-	),
-	'where_arglist' => array
-	(
-		array ('url_argname' => 'vdom_id', 'table_colname' => 'id', 'assertion' => 'uint'),
-	),
-);
 $opspec_list['vlandomain-vlanlist-add'] = array
 (
 	'table' => 'VLANDescription',
@@ -829,7 +816,7 @@ function editPortForObject ()
 {
 	global $sic;
 	assertUIntArg ('port_id');
-	assertUIntArg ('port_type_id');
+	assertStringArg ('port_type_id');
 	assertStringArg ('reservation_comment', TRUE);
 	genericAssertion ('l2address', 'l2address0');
 	genericAssertion ('name', 'string');
@@ -1435,7 +1422,7 @@ function addLotOfObjects()
 				amplifyCell ($info);
 				showSuccess ("added object " . formatPortLink ($info['id'], $info['dname'], NULL, NULL));
 			}
-			catch (RTDatabaseError $e)
+			catch (RackTablesError $e)
 			{
 				showError ("Error creating object '$name': " . $e->getMessage());
 				continue;
@@ -3182,8 +3169,9 @@ function updVSTRule()
 		// Every case that is soft-processed in process.php, will have the working copy available for a retry.
 		if ($e instanceof InvalidRequestArgException or $e instanceof RTDatabaseError)
 		{
-			@session_start();
+			startSession();
 			$_SESSION['vst_edited'] = $data;
+			session_commit();
 		}
 		throw $e;
 	}
@@ -3443,23 +3431,7 @@ function clearVlan()
 	genericAssertion ('vlan_ck', 'uint-vlan1');
 	list ($vdom_id, $vlan_id) = decodeVLANCK ($_REQUEST['vlan_ck']);
 
-	$n_cleared = 0;
-	foreach (getVLANConfiguredPorts ($_REQUEST['vlan_ck']) as $object_id => $portnames)
-	{
-		$D = getStored8021QConfig ($object_id);
-		$changes = array();
-		foreach ($portnames as $pn)
-		{
-			$conf = $D[$pn];
-			$conf['allowed'] = array_diff ($conf['allowed'], array ($vlan_id));
-			if ($conf['mode'] == 'access')
-				$conf['mode'] = 'trunk';
-			if ($conf['native'] == $vlan_id)
-				$conf['native'] = 0;
-			$changes[$pn] = $conf;
-		}
-		$n_cleared += apply8021qChangeRequest ($object_id, $changes, FALSE);
-	}
+	$n_cleared = pinpointDeleteVlan ($vdom_id, $vlan_id);
 	if ($n_cleared > 0)
 		showSuccess ("VLAN $vlan_id removed from $n_cleared ports");
 }
@@ -3467,10 +3439,9 @@ function clearVlan()
 function deleteVlan()
 {
 	genericAssertion ('vlan_ck', 'uint-vlan');
-	$confports = getVLANConfiguredPorts ($_REQUEST['vlan_ck']);
-	if (! empty ($confports))
-		throw new RackTablesError ("You can not delete VLAN that has assosiated ports");
 	list ($vdom_id, $vlan_id) = decodeVLANCK ($_REQUEST['vlan_ck']);
+	pinpointDeleteVlan ($vdom_id, $vlan_id);
+	// since there is no strict foreign keys refering VLANDescription, we can delete a row
 	usePreparedDeleteBlade ('VLANDescription', array ('domain_id' => $vdom_id, 'vlan_id' => $vlan_id));
 	showSuccess ("VLAN $vlan_id has been deleted");
 	return buildRedirectURL ('vlandomain', 'default', array ('vdom_id' => $vdom_id));
@@ -3782,6 +3753,28 @@ function setPatchCableAmount()
 {
 	commitSetPatchCableAmount (genericAssertion ('id', 'uint'), genericAssertion ('amount', 'uint0'));
 	showFuncMessage (__FUNCTION__, 'OK');
+}
+
+function updateVLANDomain()
+{
+	$domain_id = assertUIntArg ('vdom_id');
+	$group_id = assertUIntArg ('group_id', TRUE);
+	$description = assertStringArg ('vdom_descr');
+
+	if (! $group_id)
+		$group_id = NULL;
+	else
+	{
+		$dominfo = getVLANDomain ($domain_id);
+		$parent_dominfo = getVLANDomain ($group_id);
+		if ($group_id == $domain_id)
+			throw new InvalidRequestArgException ('group_id', $group_id, "domains should not be the same");
+		if ($parent_dominfo['group_id'] || $dominfo['subdomc'])
+			throw new InvalidRequestArgException ('group_id', $group_id, "Multi-level domain groups are not allowed");
+	}
+
+	usePreparedUpdateBlade ('VLANDomain', array ('group_id' => $group_id, 'description' => $description), array ('id' => $domain_id));
+	showSuccess ("VLAN domain updated successfully");
 }
 
 ?>

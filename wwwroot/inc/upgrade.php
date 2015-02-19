@@ -265,6 +265,8 @@ function getDBUpgradePath ($v1, $v2)
 		'0.20.7',
 		'0.20.8',
 		'0.20.9',
+		'0.20.10',
+		'0.20.11',
 	);
 	if (!in_array ($v1, $versionhistory) or !in_array ($v2, $versionhistory))
 		return NULL;
@@ -1831,6 +1833,15 @@ VALUES ('SHOW_OBJECTTYPE',  'no',  'string',  'no',  'no',  'yes',  'Show object
 
 			$query[] = "UPDATE Config SET varvalue = '0.20.9' WHERE varname = 'DB_VERSION'";
 			break;
+		case '0.20.10':
+			$query[] = "UPDATE Config SET varvalue = '0.20.10' WHERE varname = 'DB_VERSION'";
+			break;
+		case '0.20.11':
+			$query[] = "ALTER TABLE VLANDomain ADD COLUMN `group_id` int(10) UNSIGNED DEFAULT NULL AFTER `id`, " .
+				"ADD CONSTRAINT `VLANDomain-FK-group_id` FOREIGN KEY (`group_id`) REFERENCES `VLANDomain` (`id`) ON DELETE SET NULL";
+
+			$query[] = "UPDATE Config SET varvalue = '0.20.11' WHERE varname = 'DB_VERSION'";
+			break;
 		case 'dictionary':
 			$query = reloadDictionary();
 			break;
@@ -2052,7 +2063,8 @@ echo '</table>';
 echo '</body></html>';
 }
 
-// returns SQL query to make PortCompat symmetric (insert missing reversed-order pairs)
+// returns SQL query to make PortCompat symmetric (insert missing reversed-order pairs).
+// It should be called each time after the PortCompat table pairs being added during upgrade.
 function extendPortCompatQuery()
 {
 	return "INSERT INTO PortCompat SELECT pc1.type2, pc1.type1 FROM PortCompat pc1 LEFT JOIN PortCompat pc2 ON pc1.type1 = pc2.type2 AND pc1.type2 = pc2.type1 WHERE pc2.type1 IS NULL";

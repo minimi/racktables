@@ -632,7 +632,7 @@ function highlightObject (&$rackData, $object_id)
 {
 	// Also highlight parent objects
 	$object = spotEntity ('object', $object_id);
-	$parents = reindexByID (getParents ($object, 'object'));
+	$parents = reindexById (getParents ($object, 'object'));
 
 	for ($unit_no = $rackData['height']; $unit_no > 0; $unit_no--)
 		for ($locidx = 0; $locidx < 3; $locidx++)
@@ -1030,6 +1030,22 @@ function findAllEndpoints ($object_id, $fallback = '')
 	if (!count ($regular) && strlen ($fallback))
 		return array ($fallback);
 	return $regular;
+}
+
+// Split object's FQDN (or the common name if FQDN is not set) into the
+// hostname and domain name in Munin convention (using the first period as the
+// separator), and return the pair. Throw an exception on error.
+function getMuninNameAndDomain ($object_id)
+{
+	$o = spotEntity ('object', $object_id);
+	$hd = $o['name'];
+	// FQDN overrides the common name for Munin purposes.
+	$attrs = getAttrValues ($object_id);
+	if (array_key_exists (3, $attrs) && $attrs[3]['value'] != '')
+		$hd = $attrs[3]['value'];
+	if (2 != count ($ret = preg_split ('/\./', $hd, 2)))
+		throw new InvalidArgException ('$object_id', $object_id, 'the name is not in the host.do.ma.in format');
+	return $ret;
 }
 
 // Some records in the dictionary may be written as plain text or as Wiki
@@ -1485,7 +1501,7 @@ function redirectIfNecessary ()
 		$trigger,
 		$pageno,
 		$tabno;
-	@session_start();
+	startSession();
 	if
 	(
 		! isset ($_REQUEST['tab']) and
@@ -1767,7 +1783,7 @@ function getCellFilter ()
 	global $sic;
 	global $pageno;
 	$andor_used = FALSE;
-	@session_start();
+	startSession();
 	// if the page is submitted we get an andor value so we know they are trying to start a new filter or clearing the existing one.
 	if (isset($_REQUEST['andor']))
 		$andor_used = TRUE;
@@ -1905,8 +1921,9 @@ function backupLogMessages()
 	global $log_messages;
 	if (! empty ($log_messages))
 	{
-		@session_start();
+		startSession();
 		$_SESSION['log'] = $log_messages;
+		session_commit();
 	}
 }
 
@@ -1956,8 +1973,10 @@ function getRackImageHeight ($units)
 }
 
 // Indicate occupation state of each IP address: none, ordinary or problematic.
+// Returns number of marked up (busy) addresses
 function markupIPAddrList (&$addrlist)
 {
+	$used = 0;
 	foreach (array_keys ($addrlist) as $ip_bin)
 	{
 		$refc = array
@@ -1976,12 +1995,19 @@ function markupIPAddrList (&$addrlist)
 		}
 		$nreserved = ($addrlist[$ip_bin]['reserved'] == 'yes') ? 1 : 0; // only one reservation is possible ever
 		if ($nallocs > 1 && $nallocs != $refc['shared'] || $nallocs && $nreserved)
+		{
 			$addrlist[$ip_bin]['class'] = 'trerror';
+			++$used;
+		}
 		elseif (! isIPAddressEmpty ($addrlist[$ip_bin], array ('name', 'comment', 'inpf', 'outpf'))) // these fields don't trigger the 'busy' status
+		{
 			$addrlist[$ip_bin]['class'] = 'trbusy';
+			++$used;
+		}
 		else
 			$addrlist[$ip_bin]['class'] = '';
 	}
+	return $used;
 }
 
 function findNetRouters ($net)
@@ -2765,7 +2791,7 @@ function convertToBytes ($value)
 }
 
 // make "A" HTML element
-function mkA ($text, $nextpage, $bypass = NULL, $nexttab = NULL)
+function mkA ($text, $nextpage, $bypass = NULL, $nexttab = NULL, $attrs = array())
 {
 	global $page, $tab;
 	if ($text == '')
@@ -2785,7 +2811,11 @@ function mkA ($text, $nextpage, $bypass = NULL, $nexttab = NULL)
 			throw new InvalidArgException ('bypass', '(NULL)');
 		$args[$page[$nextpage]['bypass']] = $bypass;
 	}
-	return '<a href="' . makeHref ($args) . '">' . $text . '</a>';
+	$attrs['href'] = makeHref ($args);
+	$ret = '<a';
+	foreach ($attrs as $attr_name => $attr_value)
+		$ret .= " $attr_name=" . '"' . htmlspecialchars ($attr_value, ENT_QUOTES) . '"';
+	return $ret . '>' . $text . '</a>';
 }
 
 // make "HREF" HTML attribute
@@ -3055,7 +3085,7 @@ function getAllVLANOptions ($except = array())
 	foreach (getVLANDomainOptions() as $domain_id => $domain_descr)
 	{
 		$domain_list = array();
-		foreach (getDomainVLANList ($domain_id) as $vlan)
+		foreach (getDomainVLANList ($domain_id, TRUE) as $vlan)
 			$domain_list["${domain_id}-${vlan['vlan_id']}"] = "${vlan['vlan_id']} ${vlan['vlan_descr']}";
 		if (isset ($except[$domain_id]))
 		{
@@ -3162,18 +3192,35 @@ function getPortListPrefs()
 	return $ret;
 }
 
-// Return data for printNiftySelect() with port type options. All OIF options
-// for the default IIF will be shown, but only the default OIFs will be present
-// for each other IIFs. IIFs for that there is no default OIF will not
-// be listed.
-// This SELECT will be used for the "add new port" form.
 function getNewPortTypeOptions()
 {
-	$ret = array();
-	$prefs = getPortListPrefs();
-	foreach (getPortInterfaceCompat() as $row)
+	return getUnlinkedPortTypeOptions (NULL);
+}
+
+// Return data for printNiftySelect() with port type options. All OIF options
+// for the default or current (passed) IIFs will be shown, but only the default
+// OIFs will be present for each other IIFs. IIFs for that there is no default
+// OIF will not be listed.
+// This SELECT will be used in "manage object ports" form.
+function getUnlinkedPortTypeOptions ($port_iif_id)
+{
+	static $cache;
+	static $prefs;
+	static $compat;
+	if (! isset ($cache))
 	{
-		if ($row['iif_id'] == $prefs['iif_pick'])
+		$cache = array();
+		$prefs = getPortListPrefs();
+		$compat = getPortInterfaceCompat();
+	}
+
+	if (isset ($cache[$port_iif_id]))
+		return $cache[$port_iif_id];
+
+	$ret = array();
+	foreach ($compat as $row)
+	{
+		if ($row['iif_id'] == $prefs['iif_pick'] || $row['iif_id'] == $port_iif_id)
 			$optgroup = $row['iif_name'];
 		elseif (array_key_exists ($row['iif_id'], $prefs['oif_picks']) and $prefs['oif_picks'][$row['iif_id']] == $row['oif_id'])
 			$optgroup = 'other';
@@ -3183,6 +3230,8 @@ function getNewPortTypeOptions()
 			$ret[$optgroup] = array();
 		$ret[$optgroup][$row['iif_id'] . '-' . $row['oif_id']] = $row['oif_name'];
 	}
+
+	$cache[$port_iif_id] = $ret;
 	return $ret;
 }
 
@@ -3279,6 +3328,15 @@ function formatVLANAsPlainText ($vlaninfo)
 function formatVLANAsHyperlink ($vlaninfo)
 {
 	return mkA (formatVLANAsRichText ($vlaninfo), 'vlan', $vlaninfo['domain_id'] . '-' . $vlaninfo['vlan_id']);
+}
+
+function formatVLANAsShortLink ($vlaninfo)
+{
+	$title = sprintf ('VLAN %d @ %s', $vlaninfo['vlan_id'], $vlaninfo['domain_descr']);
+	if ($vlaninfo['vlan_descr'] != '')
+		$title .= ' (' . $vlaninfo['vlan_descr'] . ')';
+	$attrs = array ('title' => $title);
+	return mkA ($vlaninfo['vlan_id'], 'vlan', $vlaninfo['domain_id'] . '-' . $vlaninfo['vlan_id'], NULL, $attrs);
 }
 
 function formatVLANAsRichText ($vlaninfo)
@@ -3873,11 +3931,15 @@ function getEmployedVlans ($object_id, $domain_vlanlist)
 				$seen_nets[$net_id] = 1;
 				$net = spotEntity ("${family}net", $net_id);
 				foreach ($net['8021q'] as $vlan)
-					if (! isset ($employed[$vlan['vlan_id']]))
+					if (isset ($domain_vlanlist[$vlan['vlan_id']]) and ! isset ($employed[$vlan['vlan_id']]))
 						$employed[$vlan['vlan_id']] = 1;
 			}
 	}
-	return array_keys ($employed);
+	$ret = array_keys ($employed);
+	$override = callHook ('getEmployedVlans_hook', $ret, $object_id, $domain_vlanlist);
+	if (isset ($override))
+		$ret = $override;
+	return $ret;
 }
 
 // take port list with order applied and return uplink ports in the same format
@@ -5989,6 +6051,20 @@ function isCLIMode ()
 	return !isset ($_SERVER['REQUEST_METHOD']);
 }
 
+// returns true either if given domains are the same
+// or if one is a group and other is its member
+function sameDomains ($domain_id_1, $domain_id_2)
+{
+	if ($domain_id_1 == $domain_id_2)
+		return TRUE;
+	static $cache = array();
+	if (! isset ($cache[$domain_id_1]))
+		$cache[$domain_id_1] = getDomainGroupMembers ($domain_id_1);
+	if (! isset ($cache[$domain_id_2]))
+		$cache[$domain_id_2] = getDomainGroupMembers ($domain_id_2);
+	return in_array ($domain_id_1, $cache[$domain_id_2]) || in_array ($domain_id_2, $cache[$domain_id_1]);
+}
+
 // Checks if 802.1Q port uplink/downlink feature is misconfigured.
 // Returns FALSE if 802.1Q port role/linking is wrong, TRUE otherwise.
 function checkPortRole ($vswitch, $port_name, $port_order)
@@ -6024,7 +6100,7 @@ function checkPortRole ($vswitch, $port_name, $port_order)
 
 			if (! $remote_auto && ! $local_auto)
 				return TRUE;
-			elseif ($remote_auto && $local_auto && $local_auto != $remote_auto && $vswitch['domain_id'] == $remote_vswitch['domain_id'])
+			elseif ($remote_auto && $local_auto && $local_auto != $remote_auto && sameDomains ($vswitch['domain_id'], $remote_vswitch['domain_id']))
 				return TRUE; // auto-calc link ends must belong to the same domain
 			else
 				return FALSE;
@@ -6281,6 +6357,72 @@ function customKsort ($array, $order)
 	asort ($ret, SORT_NUMERIC);
 	foreach (array_keys ($ret) as $key)
 		$ret[$key] = $array[$key];
+	return $ret;
+}
+
+// RT uses PHP sessions on demand and tries to minimize session lifetime
+// to allow concurrent operations for a single user.
+// You should call session_commit after each call of this function.
+function startSession()
+{
+	if (is_callable ('session_status'))
+	{
+		if (session_status() != PHP_SESSION_ACTIVE)
+			session_start();
+	}
+	else
+	{
+		// compatibility mode for PHP prior to 5.4.0
+		$old_errorlevel = error_reporting (E_ALL & ~E_NOTICE);
+		session_start();
+		error_reporting ($old_errorlevel);
+	}
+}
+
+// loads session data. Use if you need to only read from _SESSION.
+function startROSession()
+{
+	startSession();
+	session_commit();
+}
+
+// removes a VLAN from ports that contain it, but keep a VLAN amongst others in a range
+function pinpointDeleteVlan ($domain_id, $vlan_id)
+{
+	$ret = 0;
+	$vlan_ck = $domain_id . '-' . $vlan_id;
+	$domain_vlanlist = getDomainVLANList ($domain_id);
+	$used_ports = getVLANConfiguredPorts ($vlan_ck);
+	foreach ($used_ports as $object_id => $port_list)
+	{
+		$vswitch = getVLANSwitchInfo ($object_id); // get mutex rev
+		$D = getStored8021QConfig ($object_id);
+		$changes = array();
+		foreach ($port_list as $pn)
+		{
+			if (! isset ($D[$pn]))
+				continue;
+			// remove vlan from a port only if its range does not contain foreign vlans
+			foreach (listToRanges ($D[$pn]['allowed']) as $range)
+				if (matchVLANFilter ($vlan_id, array ($range)))
+				{
+					for ($i = $range['from']; $i <= $range['to']; ++$i)
+						if (! isset ($domain_vlanlist[$i]))
+							continue 3; // keep vlan, skip to next port
+				}
+			// remove vlan from port
+			$conf = $D[$pn];
+			$conf['allowed'] = array_diff ($conf['allowed'], array ($vlan_id));
+			if ($conf['mode'] == 'access')
+				$conf['mode'] = 'trunk';
+			if ($conf['native'] == $vlan_id)
+				$conf['native'] = 0;
+			$changes[$pn] = $conf;
+		}
+		if ($changes)
+			$ret += apply8021qChangeRequest ($object_id, $changes, FALSE, $vswitch['mutex_rev']);
+	}
+
 	return $ret;
 }
 
